@@ -1,3 +1,9 @@
+# Own Instructions
+- for windows pple - install wsl (linux), in powershell: `wsl --install` (verify if steps correct)
+- install uv for python dependency management `curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.bashrc` in wsl terminal
+- `uv run -m evaluator.local_evaluator`
+
 # TechJam Conversational E-Commerce Search Challenge
 
 Build an AI shopping agent that asks useful follow-up questions and recommends the customer's hidden target product within at most 10 turns.

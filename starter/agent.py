@@ -4,6 +4,8 @@ import json
 import re
 import sqlite3
 from pathlib import Path
+import numpy as np
+from sentence_transformers import SentenceTransformer
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -40,6 +42,9 @@ class Agent:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
         self._sessions: set[str] = set()
+        self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        self._asin_order: list[str] = []
+        self._embeddings: np.ndarray | None = None
         self._build_index()
 
     def _build_index(self) -> None:
@@ -50,9 +55,15 @@ class Agent:
             "tokenize='unicode61 remove_diacritics 2')"
         )
         batch: list[tuple[str, str, str, str, str, str, str]] = []
+        dense_texts: list[str] = []
         with self.catalog_path.open(encoding="utf-8") as handle:
             for line in handle:
                 product = json.loads(line)
+                dense_texts.append(
+                    f"{_text(product.get('title'))}. {_text(product.get('categories'))}. "
+                    f"{_text(product.get('features'))}. {_text(product.get('description'))}"
+                )
+                self._asin_order.append(str(product["parent_asin"]))
                 batch.append(
                     (   # fields doesn't fully match catalog.json1?
                         str(product["parent_asin"]),
@@ -70,6 +81,30 @@ class Agent:
         if batch:
             cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
         self.connection.commit()
+        self._embeddings = self._embedder.encode(
+            dense_texts,
+            batch_size=128,
+            show_progress_bar=True,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        )
+
+    def _dense_search(self, user_message: str, top_k: int) -> list[str]:
+        if not user_message.strip() or self._embeddings is None:
+            return []
+        query_vec = self._embedder.encode(
+            [user_message], normalize_embeddings=True, convert_to_numpy=True
+        )[0]
+        similarities = self._embeddings @ query_vec
+        top_indices = np.argsort(-similarities)[:top_k]
+        return [self._asin_order[i] for i in top_indices]
+
+    def _reciprocal_rank_fusion(self, ranked_lists: list[list[str]], k: int = 60) -> list[str]:
+        scores: dict[str, float] = {}
+        for ranked in ranked_lists:
+            for position, parent_asin in enumerate(ranked):
+                scores[parent_asin] = scores.get(parent_asin, 0.0) + 1.0 / (k + position + 1)
+        return sorted(scores, key=lambda asin: scores[asin], reverse=True)
 
     def reset(self, session_id: str, user_profile: dict) -> None:
         # The profile is anonymized and may be used for personalization.
@@ -86,15 +121,31 @@ class Agent:
             raise RuntimeError("reset must be called before respond")
         unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
         expression = " OR ".join(f'"{term}"' for term in unique_terms)
+
         if not expression:
-            recommendations: list[dict] = []
+            sparse_ranked: list[str] = []
         else:
             rows = self.connection.execute(
                 "SELECT parent_asin FROM products WHERE products MATCH ? "
                 "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
-                (expression, top_k),
+                (expression, top_k * 2),
             ).fetchall()
-            recommendations = [{"parent_asin": str(row[0])} for row in rows]
+            sparse_ranked = [str(row[0]) for row in rows]
+
+        dense_ranked = self._dense_search(user_message, top_k=50)
+        fused = self._reciprocal_rank_fusion([sparse_ranked, dense_ranked])[:top_k]
+        recommendations = [{"parent_asin": asin} for asin in fused]
+        # unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
+        # expression = " OR ".join(f'"{term}"' for term in unique_terms)
+        # if not expression:
+        #     recommendations: list[dict] = []
+        # else:
+        #     rows = self.connection.execute(
+        #         "SELECT parent_asin FROM products WHERE products MATCH ? "
+        #         "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
+        #         (expression, top_k),
+        #     ).fetchall()
+        #     recommendations = [{"parent_asin": str(row[0])} for row in rows]
         return {
             "message": "Here are the closest matches I found.",
             "ask_attribute": None,

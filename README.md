@@ -1,8 +1,13 @@
 # Own Instructions
 - for windows pple - install wsl (linux), in powershell: `wsl --install` (verify if steps correct)
+- Git Setup
 - install uv for python dependency management `curl -LsSf https://astral.sh/uv/install.sh | sh
 source ~/.bashrc` in wsl terminal
 - `uv run -m evaluator.local_evaluator`
+
+Just for my reference (will remove later)
+- create smaller test sample otherwise take forever to run `uv run python scripts/build_sample_catalog.py`
+- `uv run -m evaluator.local_evaluator --catalog data/catalog_sample.jsonl`
 
 # TechJam Conversational E-Commerce Search Challenge
 

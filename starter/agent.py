@@ -13,8 +13,90 @@ STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
     "i", "in", "is", "it", "me", "my", "of", "on", "or", "please", "some",
     "that", "the", "this", "to", "want", "with", "would", "you", "looking",
+    # words that only show up as connective tissue inside OVERRIDE_SIGNALS
+    # phrases ("actually", "instead of", "changed my mind", ...) — without
+    # this they get misclassified into a bucket (defaulting to "feature")
+    # and corrupt the override-detection/confirmation flow.
+    "actually", "ignore", "earlier", "preference", "what", "need",
+    "instead", "changed", "mind",
 }
 
+# STEP A: buckets classify_constraint() in the simulator can ever produce. 
+# Asking about "category" or "brand" can never return a
+# match, so we never ask about them — that would waste a turn for nothing.
+
+ASKABLE_BUCKETS = ["material", "color", "budget", "size", "style", "use_case", "feature"]
+ 
+BUCKET_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "budget": ("budget", "under", "cheap", "afford", "price", "$"),
+    "material": (
+        "cotton", "leather", "wool", "silk", "polyester", "denim", "linen",
+        "suede", "nylon", "cashmere", "canvas", "fleece",
+    ),
+    "color": ("color", "black", "white", "blue", "red", "pink", "green", "grey", "gray", "yellow", "purple"),
+    "size": ("size", "sizing", "width", "wide", "narrow", "small", "medium", "large", "xl"),
+    "style": ("department", "style", "fit", "sleeve", "neck", "casual", "formal"),
+    "use_case": ("hiking", "running", "gym", "winter", "outdoor", "work", "travel", "summer"),
+}
+
+# STEP B: phrases that signal the customer is replacing an earlier
+# preference rather than adding to it.
+OVERRIDE_SIGNALS = (
+    "actually",
+    "ignore my earlier preference",
+    "what i need is",
+    "instead of",
+    "changed my mind",
+)
+ 
+# STEP B: yes/no vocabulary for resolving a pending override confirmation.
+AFFIRMATIVE_SIGNALS = (
+    "yes", "yeah", "yep", "yup", "sure", "correct", "right", "switch",
+    "go ahead", "please do", "update it", "change it",
+)
+NEGATIVE_SIGNALS = (
+    "no", "nah", "nope", "keep", "don't", "do not", "stay", "never mind",
+    "leave it", "no thanks",
+)
+
+# STEP C: once this many buckets have been filled, stop asking follow-up
+# questions no matter how broad the remaining candidate pool looks — we'd
+# rather return imperfect recommendations than interrogate the customer
+# forever.
+MAX_BUCKETS_BEFORE_STOP_ASKING = 4
+
+# STEP C: if an AND-across-buckets query still matches more than this many
+# catalog rows, the pool is considered "too broad" and we ask another
+# question instead of returning weak recommendations (as long as we're
+# still under MAX_BUCKETS_BEFORE_STOP_ASKING).
+BROAD_POOL_THRESHOLD = 25
+
+def classify_constraint(text: str) -> dict[str, str]:
+    """Return {bucket: matched keyword(s)} for every ASKABLE_BUCKETS bucket
+    whose keywords appear in `text`. A single message can hit several
+    buckets at once (e.g. "black leather boots under $50")."""
+    term_set = set(_terms(text))
+    hits: dict[str, str] = {}
+    for bucket in ASKABLE_BUCKETS:
+        matched = [kw for kw in BUCKET_KEYWORDS.get(bucket, ()) if kw in term_set]
+        if matched:
+            hits[bucket] = " ".join(matched)
+    return hits
+
+
+def _has_override_signal(text: str) -> bool:
+    lowered = text.lower()
+    return any(signal in lowered for signal in OVERRIDE_SIGNALS)
+
+
+def _is_affirmative(text: str) -> bool:
+    lowered = text.lower()
+    return any(signal in lowered for signal in AFFIRMATIVE_SIGNALS)
+
+
+def _is_negative(text: str) -> bool:
+    lowered = text.lower()
+    return any(signal in lowered for signal in NEGATIVE_SIGNALS)
 
 def _text(value: object) -> str:
     # {"color": "red", "size": "M"} → "color red size M"
@@ -33,7 +115,6 @@ def _terms(text: str) -> list[str]:
         for token in TOKEN_RE.findall(text)
         if len(token) > 1 and token.lower() not in STOPWORDS
     ]
-
 
 class Agent:
     """Editable weak baseline: stateless BM25 retrieval with no LLM dependency."""

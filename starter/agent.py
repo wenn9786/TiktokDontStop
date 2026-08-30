@@ -28,85 +28,6 @@ STOPWORDS = {
     "instead", "changed", "mind",
 }
 
-# STEP A: buckets classify_constraint() in the simulator can ever produce. 
-# Asking about "category" or "brand" can never return a
-# match, so we never ask about them — that would waste a turn for nothing.
-
-ASKABLE_BUCKETS = ["material", "color", "budget", "size", "style", "use_case", "feature"]
- 
-BUCKET_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "budget": ("budget", "under", "cheap", "afford", "price", "$",
-        "premium", "luxury", "expensive", "high-end", "high quality",
-    ),
-    "material": (
-        "cotton", "leather", "wool", "silk", "polyester", "denim", "linen",
-        "suede", "nylon", "cashmere", "canvas", "fleece",
-    ),
-    "color": ("color", "black", "white", "blue", "red", "pink", "green", "grey", "gray", "yellow", "purple"),
-    "size": ("size", "sizing", "width", "wide", "narrow", "small", "medium", "large", "xl"),
-    "style": ("department", "style", "fit", "sleeve", "neck", "casual", "formal"),
-    "use_case": ("hiking", "running", "gym", "winter", "outdoor", "work", "travel", "summer"),
-}
-
-# STEP B: phrases that signal the customer is replacing an earlier
-# preference rather than adding to it.
-OVERRIDE_SIGNALS = (
-    "actually",
-    "ignore my earlier preference",
-    "what i need is",
-    "instead of",
-    "changed my mind",
-)
- 
-# STEP B: yes/no vocabulary for resolving a pending override confirmation.
-AFFIRMATIVE_SIGNALS = (
-    "yes", "yeah", "yep", "yup", "sure", "correct", "right", "switch",
-    "go ahead", "please do", "update it", "change it",
-)
-NEGATIVE_SIGNALS = (
-    "no", "nah", "nope", "keep", "don't", "do not", "stay", "never mind",
-    "leave it", "no thanks",
-)
-
-# STEP C: once this many buckets have been filled, stop asking follow-up
-# questions no matter how broad the remaining candidate pool looks — we'd
-# rather return imperfect recommendations than interrogate the customer
-# forever.
-MAX_BUCKETS_BEFORE_STOP_ASKING = 4
-
-# STEP C: if an AND-across-buckets query still matches more than this many
-# catalog rows, the pool is considered "too broad" and we ask another
-# question instead of returning weak recommendations (as long as we're
-# still under MAX_BUCKETS_BEFORE_STOP_ASKING).
-BROAD_POOL_THRESHOLD = 25
-
-def classify_constraint(text: str) -> dict[str, str]:
-    """Return {bucket: matched keyword(s)} for every ASKABLE_BUCKETS bucket
-    whose keywords appear in `text`. A single message can hit several
-    buckets at once (e.g. "black leather boots under $50")."""
-    term_set = set(_terms(text))
-    hits: dict[str, str] = {}
-    for bucket in ASKABLE_BUCKETS:
-        matched = [kw for kw in BUCKET_KEYWORDS.get(bucket, ()) if kw in term_set]
-        if matched:
-            hits[bucket] = " ".join(matched)
-    return hits
-
-
-def _has_override_signal(text: str) -> bool:
-    lowered = text.lower()
-    return any(signal in lowered for signal in OVERRIDE_SIGNALS)
-
-
-def _is_affirmative(text: str) -> bool:
-    lowered = text.lower()
-    return any(signal in lowered for signal in AFFIRMATIVE_SIGNALS)
-
-
-def _is_negative(text: str) -> bool:
-    lowered = text.lower()
-    return any(signal in lowered for signal in NEGATIVE_SIGNALS)
-
 def _text(value: object) -> str:
     # {"color": "red", "size": "M"} → "color red size M"
     if value is None:
@@ -418,34 +339,131 @@ class Agent:
         self._apply_own_price_detection(state, signal, user_message)
         self._sessions[session_id] = state
 
+        query_parts: list[str] = []
+        if getattr(state, "category", ""):
+            query_parts.append(state.category)
+
+        built_query = build_query(state)
+        if build_query:
+            query_parts.append(built_query)
+
+        query_parts.append(user_message)
+
         query = " ".join(part for part in (build_query(state), user_message) if part)
         unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
         expression = " OR ".join(f'"{term}"' for term in unique_terms)
 
-        if not expression:
-            sparse_ranked: list[str] = []
-        else:
+        if expression:
             rows = self.connection.execute(
                 "SELECT parent_asin FROM products WHERE products MATCH ? "
-                "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
-                (expression, top_k * 2),
+                "ORDER BY bm25(products, 0.0, 8.0, 5.0, 3.0, 2.0, 2.0, 1.0) LIMIT ? "
+                (expression, max(100, top_k * 10)),
             ).fetchall()
             sparse_ranked = [str(row[0]) for row in rows]
+        else:
+            sparse_ranked = []
 
         dense_ranked = self._dense_search(user_message, top_k=50)
         scores = self._reciprocal_rank_fusion_scores([sparse_ranked, dense_ranked])
         scores = self._apply_price_preference(scores, session_id)
         scores = self._apply_negative_reweight(scores, session_id, turn)
-        fused = self._reciprocal_rank_fusion([sparse_ranked, dense_ranked])[:top_k]
-        recommendations = [{"parent_asin": asin} for asin in fused]
+        # fused = self._reciprocal_rank_fusion([sparse_ranked, dense_ranked])[:top_k]
+        # recommendations = [{"parent_asin": asin} for asin in fused]
 
-        for asin in fused:
-            state.shown_asins[asin] = turn
-            state.shown_counts[asin] = state.shown_counts.get(asin, 0) + 1
+        # for asin in fused:
+        #     state.shown_asins[asin] = turn
+        #     state.shown_counts[asin] = state.shown_counts.get(asin, 0) + 1
+
+        fused = self._reciprocal_rank_fusion(
+            [sparse_ranked, dense_ranked],
+            k=40,
+        )
+        candidate_ids = fused[:max(100, top_k * 10)]
+
+        reranked: list[tuple[float, str]] = []
+ 
+        try:
+            if candidate_ids:
+                placeholders = ",".join("?" for _ in candidate_ids)
+                rows = self.connection.execute(
+                    f"SELECT parent_asin, title, categories, features, details, "
+                    f"store, description FROM products "
+                    f"WHERE parent_asin IN ({placeholders})",
+                    candidate_ids,
+                ).fetchall()
+ 
+                rrf_position = {
+                    asin: position for position, asin in enumerate(fused)
+                }
+                query_terms = set(_terms(query))
+ 
+                for row in rows:
+                    asin = str(row[0])
+                    fields = [str(value or "") for value in row[1:]]
+                    corpus = " ".join(fields).lower()
+                    product_terms = set(_terms(corpus))
+ 
+                    position = rrf_position.get(asin, len(fused))
+                    score = 1.0 / (1.0 + position)
+ 
+                    # General lexical overlap.
+                    overlap = len(query_terms & product_terms)
+                    score += 0.025 * min(overlap, 15)
+ 
+                    # Stronger weights for explicit user constraints.
+                    for bucket, value in state.confirmed_constraints.items():
+                        value_text = str(value).lower().strip()
+                        value_terms = set(_terms(value_text))
+ 
+                        if not value_terms:
+                            continue
+ 
+                        if value_text in corpus:
+                            score += 0.28
+                        elif value_terms.issubset(product_terms):
+                            score += 0.20
+                        elif value_terms & product_terms:
+                            score += 0.06
+ 
+                        # Common aliases.
+                        if bucket == "color":
+                            if "grey" in value_text and "gray" in corpus:
+                                score += 0.08
+                            if "gray" in value_text and "grey" in corpus:
+                                score += 0.08
+ 
+                        if bucket == "size":
+                            size_aliases = {
+                                "extra small": ("xs", "extra small"),
+                                "extra large": ("xl", "extra large"),
+                                "x-large": ("xl", "extra large"),
+                            }
+                            for source, targets in size_aliases.items():
+                                if source in value_text and any(
+                                    target in corpus for target in targets
+                                ):
+                                    score += 0.08
+ 
+                    reranked.append((score, asin))
+        except Exception:
+            # Safety fallback: if the reranking stage hits a schema or data
+            # problem, fall back to the RRF order instead of throwing and
+            # losing the whole turn (matches what a friend's version does).
+            reranked = [
+                (1.0 / (1.0 + position), asin)
+                for position, asin in enumerate(candidate_ids)
+            ]
+ 
+        reranked.sort(key=lambda item: item[0], reverse=True)
+        recommendations = [
+            {"parent_asin": asin}
+            for _, asin in reranked[:top_k]
+        ]
 
         ask_attribute = None
-        if turn < 4 and not signal.disclosed_bucket and not signal.is_no_preference:
-            ask_attribute = choose_next_attribute(state, DEFAULT_PRIORITY)
+        if turn < 5 and not signal.disclosed_bucket and not signal.is_no_preference:
+            if len(state.confirmed_constraints) < 4:
+                ask_attribute = choose_next_attribute(state, DEFAULT_PRIORITY)
 
         return {
             "message": "Here are the closest matches I found.",

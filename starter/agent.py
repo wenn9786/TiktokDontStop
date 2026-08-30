@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+ 
 import json
 import re
 import sqlite3
@@ -13,21 +13,19 @@ except ImportError:
 from dialogue_manager import DEFAULT_PRIORITY, build_query, choose_next_attribute, update_state
 from signal_extractor import extract_signal
 from state import SessionState
-
-
+ 
+ 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
     "i", "in", "is", "it", "me", "my", "of", "on", "or", "please", "some",
     "that", "the", "this", "to", "want", "with", "would", "you", "looking",
-    # words that only show up as connective tissue inside OVERRIDE_SIGNALS
-    # phrases ("actually", "instead of", "changed my mind", ...) — without
-    # this they get misclassified into a bucket (defaulting to "feature")
-    # and corrupt the override-detection/confirmation flow.
+    # words that only show up as connective tissue in override phrases
+    # ("actually", "instead of", "changed my mind", ...) — without this
+    # they get misclassified into a bucket and corrupt query-building.
     "actually", "ignore", "earlier", "preference", "what", "need",
     "instead", "changed", "mind",
 }
-
 def _text(value: object) -> str:
     # {"color": "red", "size": "M"} → "color red size M"
     if value is None:
@@ -37,8 +35,8 @@ def _text(value: object) -> str:
     if isinstance(value, list):
         return " ".join(str(item) for item in value)
     return str(value)
-
-
+ 
+ 
 def _terms(text: str) -> list[str]:
     return [
         token.lower()
@@ -91,7 +89,7 @@ def _profile_price_signal(profile: dict) -> float:
 
 class Agent:
     """Conversational retrieval agent backed by the local dialogue modules."""
-
+ 
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
@@ -103,7 +101,7 @@ class Agent:
         self._categories: dict[str, set[str]] = {}
         self._stores: dict[str, str] = {}
         self._build_index()
-
+ 
     def _build_index(self) -> None:
         cursor = self.connection.cursor()
         cursor.execute(
@@ -161,7 +159,7 @@ class Agent:
                 normalize_embeddings=True,
                 convert_to_numpy=True,
             )
-
+ 
     def _dense_search(self, user_message: str, top_k: int) -> list[str]:
         if not user_message.strip() or self._embeddings is None:
             return []
@@ -171,7 +169,7 @@ class Agent:
         similarities = self._embeddings @ query_vec
         top_indices = np.argsort(-similarities)[:top_k]
         return [self._asin_order[i] for i in top_indices]
-
+ 
     def _reciprocal_rank_fusion(self, ranked_lists: list[list[str]], k: int = 60) -> list[str]:
         scores: dict[str, float] = {}
         for ranked in ranked_lists:
@@ -320,7 +318,7 @@ class Agent:
     def reset(self, session_id: str, user_profile: dict) -> None:
         # The profile is anonymized and may be used for personalization.
         self._sessions[session_id] = SessionState()
-
+ 
     def respond(
         self,
         session_id: str,
@@ -338,25 +336,29 @@ class Agent:
         state.track = "buying" if state.buying_confidence > 0.8 else "browsing"
         self._apply_own_price_detection(state, signal, user_message)
         self._sessions[session_id] = state
-
+ 
+        # Keep category/confirmed constraints in every turn.
+        # Later user replies can be short ("black", "yes", etc.), so using
+        # only the newest message loses important retrieval context.
         query_parts: list[str] = []
         if getattr(state, "category", ""):
             query_parts.append(state.category)
-
+ 
         built_query = build_query(state)
-        if build_query:
+        if built_query:
             query_parts.append(built_query)
-
+ 
         query_parts.append(user_message)
-
-        query = " ".join(part for part in (build_query(state), user_message) if part)
-        unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
+        query = " ".join(part for part in query_parts if part)
+ 
+        # ---- Stage 1: broad lexical retrieval ----
+        unique_terms = list(dict.fromkeys(_terms(query)))[:60]
         expression = " OR ".join(f'"{term}"' for term in unique_terms)
-
+ 
         if expression:
             rows = self.connection.execute(
                 "SELECT parent_asin FROM products WHERE products MATCH ? "
-                "ORDER BY bm25(products, 0.0, 8.0, 5.0, 3.0, 2.0, 2.0, 1.0) LIMIT ? "
+                "ORDER BY bm25(products, 0.0, 8.0, 5.0, 3.0, 2.0, 2.0, 1.0) LIMIT ?",
                 (expression, max(100, top_k * 10)),
             ).fetchall()
             sparse_ranked = [str(row[0]) for row in rows]
@@ -379,7 +381,11 @@ class Agent:
             k=40,
         )
         candidate_ids = fused[:max(100, top_k * 10)]
-
+ 
+        # ---- Stage 4: explicit constraint-aware reranking ----
+        # RRF alone does not know that "black leather" is more important than
+        # a generic semantic match. The second stage explicitly rewards
+        # products satisfying confirmed constraints.
         reranked: list[tuple[float, str]] = []
  
         try:
@@ -459,12 +465,11 @@ class Agent:
             {"parent_asin": asin}
             for _, asin in reranked[:top_k]
         ]
-
+ 
         ask_attribute = None
         if turn < 5 and not signal.disclosed_bucket and not signal.is_no_preference:
             if len(state.confirmed_constraints) < 4:
                 ask_attribute = choose_next_attribute(state, DEFAULT_PRIORITY)
-
         return {
             "message": "Here are the closest matches I found.",
             "ask_attribute": ask_attribute,

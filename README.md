@@ -48,10 +48,15 @@ the public set), we built:
 
 Requires Python 3.10+ and [`uv`](https://docs.astral.sh/uv/).
 
+## To install uv, run following in wsl
+```
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.bashrc
+```
+
 ```bash
 git clone <repo-url>
 cd techjam-conversational-search
-uv sync
 ```
 
 Download the catalog per the challenge instructions (not committed to the repo):

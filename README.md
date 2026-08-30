@@ -1,122 +1,178 @@
-# Own Instructions
-- for windows pple - install wsl (linux), in powershell: `wsl --install` (verify if steps correct)
-- Git Setup
-- install uv for python dependency management `curl -LsSf https://astral.sh/uv/install.sh | sh
-source ~/.bashrc` in wsl terminal
-- `uv run -m evaluator.local_evaluator`
+# TechJam Conversational Search
 
-Just for my reference (will remove later)
-- create smaller test sample otherwise take forever to run `uv run python scripts/build_sample_catalog.py`
-- `uv run -m evaluator.local_evaluator --catalog data/catalog_sample.jsonl`
+A conversational shopping agent that retrieves and ranks products from a 50,000-item
+Amazon Clothing/Shoes/Jewelry catalog across multi-turn dialogue, combining sparse
+(BM25) and dense (embedding) retrieval with a dialogue state tracker that detects
+buying vs. browsing intent, accumulates disclosed constraints, and asks clarifying
+questions to converge on the shopper's hidden target product.
 
-# TechJam Conversational E-Commerce Search Challenge
+## Project Overview
 
-Build an AI shopping agent that asks useful follow-up questions and recommends the customer's hidden target product within at most 10 turns.
+Each session gives the agent an anonymized `user_profile` and an opening customer
+message. On every turn (up to 10), the agent may ask a clarification question
+(`ask_attribute`) and/or return up to 10 ranked `parent_asin` candidates. A session
+succeeds the moment the target product appears in the top-10.
 
-## What You Receive
+Starting from the weak BM25-only starter (Hit Rate@10 0.125, MRR 0.068, MTTC 9.81 on
+the public set), we built:
 
-- A frozen catalog of 50,000 products from the `Clothing_Shoes_and_Jewelry` category of Amazon Reviews 2023.
-- 200 labeled public sessions for local development.
-- A weak BM25 starter agent and deterministic local evaluator.
-- The Agent API contract and scoring rules.
+1. **Sparse retrieval** — SQLite FTS5 (BM25-scored) over title, categories, features,
+   details, store, and description.
+2. **Dense retrieval** — a `sentence-transformers` bi-encoder (`all-MiniLM-L6-v2`)
+   embeds the full catalog once at startup; each turn's query is embedded and matched
+   via cosine similarity, catching semantic matches BM25 misses on vague queries.
+3. **Reciprocal Rank Fusion (RRF)** — merges sparse and dense ranked lists without
+   needing to normalize their incompatible score scales.
+4. **A dialogue state layer** (`state.py`, `signal_extractor.py`, `dialogue_manager.py`)
+   that tracks what's been disclosed, detects intent overrides, and decides what to
+   ask next.
 
-The organizer keeps 800 additional sessions private for final evaluation.
+### Dialogue state modules
 
-## Task
+- **`state.py`** — two dataclasses. `SessionState` holds per-session dialogue state:
+  track (`browsing`/`buying`), buying confidence, confirmed constraints, and
+  exhausted/asked buckets. `TurnSignal` holds what a single user turn implied.
+- **`signal_extractor.py`** — regex-based turn classifier. Detects overrides
+  ("actually", "never mind"), no-preference replies ("doesn't matter", "up to you"),
+  vague/browsing language ("just looking", "not sure"), and which attribute bucket
+  (material, colour, size, style, use_case) the message discloses a value for.
+  Produces a `TurnSignal` and a `confidence_delta` used to move the session between
+  "browsing" and "buying".
+- **`dialogue_manager.py`** — pure state-transition logic. `update_state()` folds a
+  `TurnSignal` into the prior `SessionState` (overrides replace a bucket's value,
+  no-preference marks it exhausted, confidence is clamped to `[0, 1]`).
+  `choose_next_attribute()` walks `DEFAULT_PRIORITY` to decide what to ask about next.
+  `build_query()` turns confirmed constraints into a query fragment.
 
-For each session, your agent receives an anonymized preference profile and a short customer message. Raw user IDs, review text, timestamps, and purchase history are never disclosed. On every turn the agent may:
+## Setup and Installation
 
-- ask a natural clarification question in `message` and identify one requested field in `ask_attribute`;
-- return a ranked list of up to 10 catalog `parent_asin` values;
-- do both in the same response.
+Requires Python 3.10+ and [`uv`](https://docs.astral.sh/uv/).
 
-The session ends when the target product appears in the scored Top 10 or after turn 10. Sessions cover Buying, Browsing, Intent Override, and Boundary behavior.
+```bash
+git clone <repo-url>
+cd techjam-conversational-search
+uv sync
+```
 
-## Download the Catalog
-
-Download `catalog.jsonl.gz` from the GitHub Release attached to this repository, then run:
+Download the catalog per the challenge instructions (not committed to the repo):
 
 ```bash
 gzip -dk catalog.jsonl.gz
 mv catalog.jsonl data/catalog.jsonl
 ```
 
-Verify the downloaded file using the published `SHA256SUMS` file.
+Verify against the published `SHA256SUMS`.
 
-## Run the Starter
+First run downloads `sentence-transformers/all-MiniLM-L6-v2` (~80MB) from Hugging
+Face, cached locally afterward (no `HF_TOKEN` needed for this public model).
 
-Python 3.10 or later is recommended. The starter uses only the Python standard library.
+> **WSL note:** keep the repo on the native Linux filesystem (e.g. `~/projects/...`)
+> rather than a mounted Windows drive (`/mnt/c/`, `/mnt/d/`) — imports and file I/O
+> are substantially slower across that boundary.
+
+## Steps to Reproduce Results
 
 ```bash
-python3 -m evaluator.local_evaluator
+uv run -m evaluator.local_evaluator
 ```
 
-Edit `starter/agent.py` to implement your system. Do not edit the evaluator or public labels when reporting your local score.
-The command writes per-session results and aggregate metrics to `results.json`.
+Builds the FTS5 index and embeds the full catalog, simulates all 200 public sessions,
+writes `results.json`, and prints the summary metrics (`hit_rate_at_10`, `mrr`, `mttc`,
+`efficiency`, `recommended_technical_score`, plus a `scenario_metrics` breakdown by
+`boundary`/`browsing`/`buying`/`intent_override`).
 
-The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
-MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
+For faster iteration during development, we built a smaller sample catalog guaranteed
+to contain every ground-truth ASIN referenced in the public set:
 
-## Agent Interface
-
-```python
-class Agent:
-    def reset(self, session_id: str, user_profile: dict) -> None:
-        ...
-
-    def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
-        return {
-            "message": "Do you have a material preference?",
-            "ask_attribute": "material",
-            "recommendations": [
-                {"parent_asin": "B000..."},
-                {"parent_asin": "B001..."}
-            ],
-            "usage": {"prompt_tokens": 120, "completion_tokens": 30}
-        }
+```bash
+uv run python scripts/build_sample_catalog.py
+uv run -m evaluator.local_evaluator --catalog data/catalog_sample.jsonl
 ```
 
-`ask_attribute` is one of `category`, `material`, `color`, `size`, `style`, `brand`, `budget`, `feature`, `use_case`, `other`, or `null`. See `docs/agent_api_contract.json`.
+> Sample-catalog metrics aren't comparable to full-catalog runs (fewer distractors
+> inflate hit rate) — use it only to sanity-check logic changes, then confirm final
+> numbers on the full catalog.
 
-## Technical Metrics
+## How the Solution Maps to the Four Pillars
 
-- **Hit Rate@10:** fraction of sessions that find the target within 10 turns.
-- **MRR:** mean reciprocal rank of the target; a miss contributes zero.
-- **MTTC:** mean first-hit turn; a miss is assigned turn 11.
-- **Reported token usage:** prompt and completion tokens returned by the team's model client.
+**I. Core Architecture: Intent Routing & Hybrid Pipeline**
+`dialogue_manager.py` tracks a `buying_confidence` score per session, updated each
+turn by `signal_extractor.py`'s disclosed-bucket and override detection; the session
+is classified `buying` once confidence exceeds a threshold, `browsing` otherwise. This
+routing currently informs the *query construction* fed into retrieval (`build_query()`
+folds confirmed constraints into the search string) rather than switching between two
+structurally different retrieval tracks. Multi-route retrieval is implemented as
+specified — keyword (BM25/FTS5) and vector similarity (dense bi-encoder), fused via
+RRF. **Not currently implemented:** a category-matching route, and the LLM semantic
+ranking stage — an LLM/cross-encoder reranking pass was prototyped but removed for
+this submission due to per-turn latency at full catalog scale (see Limitations).
 
-```text
-TechnicalScore = 0.50 × HitRate@10 + 0.30 × MRR + 0.20 × Efficiency
-Efficiency = clip((11 - MTTC) / 10, 0, 1)
-```
+**II. Dialog Strategy: Multi-Turn Scenario Evolution**
+Implemented. `SessionState.confirmed_constraints` accumulates disclosed slots
+incrementally; `signal_extractor.py`'s override detection lets a new disclosure
+overwrite a bucket's prior value rather than merge with it, handling abrupt intent
+change. `choose_next_attribute()` selects an unasked, unexhausted bucket to ask about
+each turn (gated to the first few turns and skipped when the shopper just disclosed
+something or stated no preference), which is what drives proactive clarification.
+**Partially implemented:** clarification is currently triggered by turn count and
+prior disclosure, not by directly measuring candidate-pool size/over-generality —
+tying `choose_next_attribute()` to actual retrieval ambiguity (e.g. asking only when
+the fused candidate pool exceeds a size threshold) is the natural next step.
 
-Only exact `parent_asin` equality produces a hit. Core metrics are also reported by scenario.
+**III. Self-Evolution: Dynamic Context Programming**
+**Partially implemented.** Short-term session state updates every turn via
+`update_state()`, and retrieval queries are re-built each turn from accumulated
+constraints (`build_query()`), so the agent does adapt within a session. **Not
+implemented:** long-term user-profile usage — `user_profile` is passed into `reset()`
+but currently unused — and there is no runtime re-orchestration of the pipeline's own
+strategy beyond the fixed attribute-priority list; this is the pillar we'd invest in
+most with more time.
 
-## Model Choice and Cost
+**IV. Evaluation Matrix: Product & Efficiency Metrics**
+Fully met by the provided evaluator, which we ran as-is without modification:
+Hit Rate@10, MRR, and MTTC are computed exactly as specified, both overall and per
+scenario, via `evaluator/local_evaluator.py`.
 
-Teams may use any legally accessible LLM API or local model. Teams manage their own credentials and must never commit API keys. Model choice, estimated cost, token usage, and latency must be disclosed. Token usage is a feasibility metric, not part of the core technical score. The organizer does not provide or reimburse model API credits; teams are responsible for any costs incurred through optional external services.
+## Limitations & Future Improvements
 
-## Files
+**No LLM/cross-encoder reranking in this submission.** We built and tested a local
+cross-encoder reranking pass (`cross-encoder/ms-marco-MiniLM-L-6-v2`) over the fused
+candidate pool, which is the step the spec calls "LLM Semantic Ranking." At full
+catalog scale (50,000 products × 200 sessions × up to 10 turns), the reranker's
+per-(query, candidate) forward pass made full evaluation runs impractically slow, so
+it's removed from this submission. Given more time, we would reintroduce it with a
+tighter candidate pool, adaptive skip-when-unambiguous logic, and/or a distilled or
+batched scoring approach to keep latency acceptable at scale.
 
-```text
-data/public_set.jsonl             200 labeled development sessions
-docs/competition_specification.md participant rules and evaluation protocol
-docs/agent_api_contract.json      machine-readable Agent contract
-docs/evaluation_config.json       scoring configuration
-docs/baseline_results.json        reproducible weak-starter reference score
-starter/agent.py                  editable weak starter
-evaluator/local_evaluator.py      public-set simulator and scorer
-```
+**No category-matching retrieval route.** Only keyword and vector similarity are
+implemented as retrieval routes; a dedicated category-tree route (as distinct from
+category text folded into the BM25 fields) was not built separately.
 
-## Judging and Submission Policy
+**Clarification triggering is heuristic, not pool-size-driven.** `choose_next_attribute`
+follows a fixed priority order gated by turn count, rather than directly measuring
+candidate-pool ambiguity and triggering "Over-Generality" cutoffs as specified. A more
+faithful implementation would compute candidate-pool size/diversity after each
+retrieval pass and only ask when that pool is genuinely broad.
 
-- Participant submission requirements: `docs/submission_rules.md`
-- Participant release checklist: `docs/participant_release_checklist.md`
-- Organizer-only final judging controls: `organizer/JUDGING_RUNBOOK.md`
-- Organizer private release checklist: `organizer/private_release_checklist.md`
-- Judging day operations SOP: `organizer/JUDGING_DAY_SOP.md`
+**No long-term personalization.** `user_profile` is accepted but unused; prior
+purchase patterns and preference tags could inform initial retrieval ranking or which
+attribute to ask about first.
 
-## Data Source
+**Attribute/override/no-preference detection is regex-based**, which is brittle to
+phrasing our patterns don't anticipate. An LLM-based extractor would generalize
+better to open-ended natural language, at the cost of latency and token spend.
 
-The catalog and sessions are derived from Amazon Reviews 2023 by McAuley Lab, UCSD. See `DATA_ATTRIBUTION.md` before using or redistributing the data.
-Sessions are sampled deterministically from the official Clothing 5-core leave-last-out split and joined to the frozen catalog.
+**`intent_override` is the weakest-performing scenario** in our local testing —
+correctly discarding a stale constraint while preserving unrelated ones is harder
+than steady-state accumulation, and our confirmation flow is a first pass rather than
+a fully robust solution.
+
+## Team Member Contributions
+
+| Member | Role | Contribution |
+|---|---|---|
+| PEARL, KM | Intent detection & routing | *(fill in specifics)* |
+| WY | Retrieval pipeline | Sparse (BM25/FTS5) + dense (bi-encoder) hybrid retrieval, RRF fusion; prototyped and evaluated cross-encoder reranking (removed from final submission for latency) |
+| MX | Conversation state & dialogue strategy | `state.py`, `signal_extractor.py`, `dialogue_manager.py` — *(fill in specifics)* |
+| JY | Personalization & context programming | *(fill in specifics)* |
+| *(unassigned)* | Evaluation, integration, infra | *(fill in)* |

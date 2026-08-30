@@ -2,8 +2,23 @@
 from state import SessionState, TurnSignal
 from dialogue_manager import update_state, choose_next_attribute, build_query
 
+def make_state(
+    track="browsing",
+    buying_confidence=0.0,
+    confirmed_constraints=None,
+    exhausted_buckets=None,
+    asked_buckets=None,
+):
+    return SessionState(
+        track=track,
+        buying_confidence=buying_confidence,
+        confirmed_constraints=confirmed_constraints if confirmed_constraints is not None else {},
+        exhausted_buckets=exhausted_buckets if exhausted_buckets is not None else set(),
+        asked_buckets=asked_buckets if asked_buckets is not None else set(),
+    )
+
 def test_disclosed_value_gets_confirmed():
-    prior = SessionState(track="browsing", buying_confidence=0.2)
+    prior = make_state(track="browsing", buying_confidence=0.2)
     signal = TurnSignal(
         is_override=False,
         disclosed_bucket="material",
@@ -17,7 +32,7 @@ def test_disclosed_value_gets_confirmed():
     assert result.buying_confidence == 0.5
 
 def test_no_preference_goes_to_exhausted_not_confirmed():
-    prior = SessionState(track="buying", buying_confidence=0.6)
+    prior = make_state(track="buying", buying_confidence=0.6)
     signal = TurnSignal(
         is_override=False,
         disclosed_bucket="brand",
@@ -30,7 +45,7 @@ def test_no_preference_goes_to_exhausted_not_confirmed():
     assert "brand" not in result.confirmed_constraints
 
 def test_choose_next_attribute_skips_asked():
-    state = SessionState(
+    state = make_state(
         track="buying",
         buying_confidence=0.5,
         asked_buckets={"feature"},
@@ -39,7 +54,7 @@ def test_choose_next_attribute_skips_asked():
     assert next_bucket == "material"
 
 def test_build_query_uses_only_confirmed():
-    state = SessionState(
+    state = make_state(
         track="buying",
         buying_confidence=0.7,
         confirmed_constraints={"material": "waterproof", "color": "black"},

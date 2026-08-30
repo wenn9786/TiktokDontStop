@@ -1,12 +1,12 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 @dataclass
 class SessionState:
-    track: str
-    buying_confidence: float
-    confirmed_constraints: dict[str, str]
-    exhausted_buckets: set[str]
-    asked_buckets: set[str]
+    track: str = "browsing"
+    buying_confidence: float = 0.0
+    confirmed_constraints: dict[str, str] = field(default_factory=dict)
+    exhausted_buckets: set[str] = field(default_factory=set)
+    asked_buckets: set[str] = field(default_factory=set)
 
 @dataclass
 class TurnSignal:

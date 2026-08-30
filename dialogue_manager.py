@@ -5,12 +5,14 @@ def update_state(prior: SessionState, signal: TurnSignal) -> SessionState:
     new_exhausted = set(prior.exhausted_buckets)
     new_asked = set(prior.asked_buckets)
     new_confidence = prior.buying_confidence
+    new_mention_counts = dict(prior.bucket_mention_counts)
 
     if signal.is_override:
         # replace the old value for this bucket with the new one
         if signal.disclosed_bucket and signal.disclosed_value:
             new_confirmed[signal.disclosed_bucket] = signal.disclosed_value
             new_asked.add(signal.disclosed_bucket)
+            new_mention_counts[signal.disclosed_bucket] = new_mention_counts.get(signal.disclosed_bucket, 0) + 1
         new_confidence += signal.confidence_delta
 
     elif signal.is_no_preference:
@@ -32,6 +34,10 @@ def update_state(prior: SessionState, signal: TurnSignal) -> SessionState:
         confirmed_constraints=new_confirmed,
         exhausted_buckets=new_exhausted,
         asked_buckets=new_asked,
+        bucket_mention_counts=new_mention_counts,
+        user_profile=prior.user_profile,
+        shown_asins=prior.shown_asins,
+        shown_counts=prior.shown_counts,
     )
 
 def choose_next_attribute(state: SessionState, priority_order: list[str]) -> str | None:

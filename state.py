@@ -7,6 +7,12 @@ class SessionState:
     confirmed_constraints: dict[str, str] = field(default_factory=dict)
     exhausted_buckets: set[str] = field(default_factory=set)
     asked_buckets: set[str] = field(default_factory=set)
+    bucket_mention_counts: dict[str, int] = field(default_factory=dict)
+    user_profile: dict = field(default_factory=dict)
+    shown_asins: dict[str, int] = field(default_factory=dict)
+    shown_counts: dict[str, int] = field(default_factory=dict)
+
+
 
 @dataclass
 class TurnSignal:

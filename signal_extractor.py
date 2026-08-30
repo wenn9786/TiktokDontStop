@@ -38,12 +38,19 @@ use_case_patterns = re.compile(
     re.IGNORECASE,
 )
 
+budget_patterns = re.compile(
+    r"\b(budget|under \$?\d+|cheap(er)?|afford(able)?|inexpensive|price|"
+    r"premium|luxury|expensive|high-end|high quality)\b",
+    re.IGNORECASE,
+)
+
 BUCKET_PATTERNS = {
     "material": material_patterns,
     "colour": colour_patterns,
     "size": size_patterns,
     "style": style_patterns,
     "use_case": use_case_patterns,
+    "budget": budget_patterns,
 }
 
 def find_disclosed_bucket(text: str) -> tuple[str|None, str|None]:

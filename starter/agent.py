@@ -5,7 +5,13 @@ import re
 import sqlite3
 from pathlib import Path
 import numpy as np
-from sentence_transformers import SentenceTransformer
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    SentenceTransformer = None
+from dialogue_manager import DEFAULT_PRIORITY, build_query, choose_next_attribute, update_state
+from signal_extractor import extract_signal
+from state import SessionState
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -117,13 +123,13 @@ def _terms(text: str) -> list[str]:
     ]
 
 class Agent:
-    """Editable weak baseline: stateless BM25 retrieval with no LLM dependency."""
+    """Conversational retrieval agent backed by the local dialogue modules."""
 
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
-        self._sessions: set[str] = set()
-        self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        self._sessions: dict[str, SessionState] = {}
+        self._embedder = SentenceTransformer("all-MiniLM-L6-v2") if SentenceTransformer else None
         self._asin_order: list[str] = []
         self._embeddings: np.ndarray | None = None
         self._build_index()
@@ -162,13 +168,14 @@ class Agent:
         if batch:
             cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
         self.connection.commit()
-        self._embeddings = self._embedder.encode(
-            dense_texts,
-            batch_size=128,
-            show_progress_bar=True,
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-        )
+        if self._embedder:
+            self._embeddings = self._embedder.encode(
+                dense_texts,
+                batch_size=128,
+                show_progress_bar=True,
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+            )
 
     def _dense_search(self, user_message: str, top_k: int) -> list[str]:
         if not user_message.strip() or self._embeddings is None:
@@ -189,7 +196,7 @@ class Agent:
 
     def reset(self, session_id: str, user_profile: dict) -> None:
         # The profile is anonymized and may be used for personalization.
-        self._sessions.add(session_id)
+        self._sessions[session_id] = SessionState()
 
     def respond(
         self,
@@ -200,7 +207,16 @@ class Agent:
     ) -> dict:
         if session_id not in self._sessions:
             raise RuntimeError("reset must be called before respond")
-        unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
+        prior_state = self._sessions[session_id]
+        signal = extract_signal(user_message, prior_state)
+        if signal.disclosed_bucket == "colour":
+            signal.disclosed_bucket = "color"
+        state = update_state(prior_state, signal)
+        state.track = "buying" if state.buying_confidence > 0.8 else "browsing"
+        self._sessions[session_id] = state
+
+        query = " ".join(part for part in (build_query(state), user_message) if part)
+        unique_terms = list(dict.fromkeys(_terms(query)))[:40]
         expression = " OR ".join(f'"{term}"' for term in unique_terms)
 
         if not expression:
@@ -213,23 +229,15 @@ class Agent:
             ).fetchall()
             sparse_ranked = [str(row[0]) for row in rows]
 
-        dense_ranked = self._dense_search(user_message, top_k=50)
+        dense_ranked = self._dense_search(query, top_k=50)
         fused = self._reciprocal_rank_fusion([sparse_ranked, dense_ranked])[:top_k]
         recommendations = [{"parent_asin": asin} for asin in fused]
-        # unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
-        # expression = " OR ".join(f'"{term}"' for term in unique_terms)
-        # if not expression:
-        #     recommendations: list[dict] = []
-        # else:
-        #     rows = self.connection.execute(
-        #         "SELECT parent_asin FROM products WHERE products MATCH ? "
-        #         "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
-        #         (expression, top_k),
-        #     ).fetchall()
-        #     recommendations = [{"parent_asin": str(row[0])} for row in rows]
+        ask_attribute = None
+        if turn < 4 and not signal.disclosed_bucket and not signal.is_no_preference:
+            ask_attribute = choose_next_attribute(state, DEFAULT_PRIORITY)
         return {
             "message": "Here are the closest matches I found.",
-            "ask_attribute": None,
+            "ask_attribute": ask_attribute,
             "recommendations": recommendations,
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }

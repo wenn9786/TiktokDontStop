@@ -304,8 +304,9 @@ def main() -> None:
     samples = load_jsonl(args.dataset)
     catalog_ids, categories, products = catalog_index(args.catalog)
     result = evaluate(Agent(args.catalog), samples, catalog_ids, categories, products)
-    Path(args.output).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({key: value for key, value in result.items() if key != "sessions"}, indent=2))
+    summary = {key: value for key, value in result.items() if key != "sessions"}
+    Path(args.output).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

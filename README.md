@@ -171,13 +171,3 @@ better to open-ended natural language, at the cost of latency and token spend.
 correctly discarding a stale constraint while preserving unrelated ones is harder
 than steady-state accumulation, and our confirmation flow is a first pass rather than
 a fully robust solution.
-
-## Team Member Contributions
-
-| Member | Role | Contribution |
-|---|---|---|
-| PEARL, KM | Intent detection & routing | *(fill in specifics)* |
-| WY | Retrieval pipeline | Sparse (BM25/FTS5) + dense (bi-encoder) hybrid retrieval, RRF fusion; prototyped and evaluated cross-encoder reranking (removed from final submission for latency) |
-| MX | Conversation state & dialogue strategy | `state.py`, `signal_extractor.py`, `dialogue_manager.py` — *(fill in specifics)* |
-| JY | Personalization & context programming | *(fill in specifics)* |
-| *(unassigned)* | Evaluation, integration, infra | *(fill in)* |
